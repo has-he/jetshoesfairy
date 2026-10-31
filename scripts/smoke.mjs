@@ -18,6 +18,10 @@ const check = (condition, message) => { assert.ok(condition, message); checks++;
 try {
   await mkdir('test-results', { recursive: true });
   const context = await browser.newContext({ viewport: { width: 1440, height: 1080 }, deviceScaleFactor: 1 });
+  const legacySettings = { mass: 1, thrust: 33, rotationTorque: 4, angularDamping: 0.65, fuelCapacity: 2.2, fuelRegen: 0.9, wingDrag: 5, jointStrength: 1, balance: 1.2, friction: 0.85, crashThreshold: 4.8 };
+  await context.addInitScript(settings => {
+    if (!localStorage.getItem('jf-settings')) localStorage.setItem('jf-settings', JSON.stringify(settings));
+  }, legacySettings);
   const page = await context.newPage();
   page.on('pageerror', err => errors.push(err.message));
   page.on('console', msg => { if (msg.type() === 'error') errors.push(msg.text()); });
@@ -28,6 +32,13 @@ try {
   check(await page.locator('#first-hint').isVisible(), 'ready screen renders with playable course and control hint');
   check(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), 'desktop has no horizontal overflow');
   check((await page.locator('#timer').textContent()) === '00:00.00', 'timer waits for player input');
+  check(await page.evaluate(() => window.__FAIRY__.sim.settings.flightAssist === 1 && window.__FAIRY__.sim.course === 'first-flight'), 'new Flow control and short course are the default despite saved v0.1 settings');
+  check(await page.evaluate(() => window.__FAIRY__.sim.settings.viewScale === 0.7), 'Flow starts with a smaller character on screen');
+  await page.locator('#feel').selectOption('legacy');
+  check(await page.evaluate(() => window.__FAIRY__.sim.settings.thrust === 33 && window.__FAIRY__.sim.settings.flightAssist === 0), 'saved v0.1 tuning can be restored from the visible feel selector');
+  check((await page.locator('#air-manual').textContent()).includes('Counter-steer') && (await page.locator('#hint-controls').textContent()).includes('Counter-steer'), 'Classic instructions describe free rotation instead of Flow settling');
+  check(await page.evaluate(expected => localStorage.getItem('jf-settings') === JSON.stringify(expected), legacySettings), 'original saved tuning remains unchanged');
+  await page.locator('#feel').selectOption('flow');
 
   await page.locator('#stage').focus();
   await page.keyboard.down('ArrowRight'); await page.waitForTimeout(450); await page.keyboard.up('ArrowRight');
@@ -71,6 +82,10 @@ try {
   await page.locator('#stage').focus(); await page.keyboard.press('g');
   check(await page.locator('#debug').getAttribute('aria-pressed') === 'true', 'G toggles the physics overlay');
   await page.keyboard.press('r');
+
+  await page.locator('#course').selectOption('garden');
+  check(await page.evaluate(() => window.__FAIRY__.sim.course === 'garden' && window.__FAIRY__.sim.finishX === 46 && window.__FAIRY__.snapshot().state === 'ready'), 'full course stays available and course changes reset the whole world');
+  await page.locator('#course').selectOption('first-flight');
 
   // Exercise the terminal UI using a physical fall, rather than a mocked DOM state.
   await page.evaluate(() => {

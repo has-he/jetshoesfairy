@@ -261,6 +261,42 @@ h1 em {
   letter-spacing: 1.2px;
   white-space: nowrap;
 }
+.course-name select {
+  width: auto;
+  max-width: 260px;
+  border: 0;
+  border-radius: 0;
+  padding: 5px 18px 5px 0;
+  font: inherit;
+  letter-spacing: inherit;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+.course-name select option {
+  background: #252d23;
+}
+.landing-feedback {
+  position: absolute;
+  top: 30%;
+  left: 50%;
+  transform: translateX(-50%);
+  text-align: center;
+  color: var(--lime);
+  font: italic 25px Georgia, serif;
+  text-shadow: 0 2px 10px #15251f;
+  pointer-events: none;
+}
+.landing-feedback span {
+  display: block;
+  margin-top: 5px;
+  color: #d9e6cc;
+  font: 9px Arial, sans-serif;
+  letter-spacing: 1px;
+}
+#controls-panel .field-note {
+  margin-top: 14px;
+}
 .course-number {
   color: #8d9a80;
   margin-left: 3px;
@@ -1266,6 +1302,11 @@ dialog li strong {
   }
 }
 @media(max-width:650px) {
+  .course-name select {
+    max-width: 210px;
+    font-size: 6.5px;
+    padding-right: 7px;
+  }
   .panel-content h2 br {
     display: block;
   }

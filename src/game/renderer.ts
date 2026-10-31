@@ -1,7 +1,7 @@
 import { Application, Graphics, Text } from 'pixi.js';
 import { Vec2 } from 'planck';
 import type { Body } from 'planck';
-import { FINISH_X, Simulation } from './physics';
+import { Simulation } from './physics';
 
 type Particle = { x: number; y: number; vx: number; vy: number; life: number; max: number; size: number };
 const C = { sky: 0x192b32, rock: 0x34494a, edge: 0x52635a, grass: 0xb2c976, lime: 0xd8f36a, pink: 0xf6b9bf, cream: 0xf1edcf };
@@ -58,10 +58,10 @@ export class GameRenderer {
   render(sim: Simulation, dt: number) {
     this.time += dt;
     const { width: w, height: h } = this.app.screen;
-    this.scale = Math.max(30, Math.min(54, h / 10.3));
+    this.scale = Math.max(30, Math.min(54, h / 10.3)) * sim.settings.viewScale;
     const p = sim.torso.getPosition();
     const targetX = Math.max(-2.5, p.x - (w / this.scale) * 0.3);
-    const targetY = Math.max(0, p.y - 5);
+    const targetY = Math.max(0, p.y - 5 / sim.settings.viewScale);
     const follow = 1 - Math.exp(-dt * 5);
     this.cameraX += (targetX - this.cameraX) * follow;
     this.cameraY += (targetY - this.cameraY) * follow;
@@ -149,11 +149,14 @@ export class GameRenderer {
     g.moveTo(sx - 22, sy - 3).lineTo(sx - 22, sy - 47).stroke({ color: C.cream, alpha: 0.4, width: 1 });
     g.poly([sx - 21, sy - 47, sx + 3, sy - 40, sx - 21, sy - 32]).fill({ color: C.cream, alpha: 0.65 });
     this.label('start', 'START', sx - 20, sy + 34, C.cream, 9, 0.4);
-    const [lx, ly] = this.point(8, 0);
+    const runway = sim.platforms.find(p => p.id === 'runway')!;
+    const landing = sim.platforms.find(p => p.id === 'landing')!;
+    const home = sim.platforms.find(p => p.id === 'home')!;
+    const [lx, ly] = this.point(runway.body.getPosition().x + runway.width / 2 - 1, 0);
     this.label('gap', '01 / COMMIT TO THE GAP', lx + 65, ly + 91, C.cream, 9, 0.45);
-    const [px, py] = this.point(14.4, 1);
+    const [px, py] = this.point(landing.body.getPosition().x, 1);
     this.label('landing', '02 / STICK THE LANDING', px, py - 34, C.cream, 9, 0.45);
-    const [fx, fy] = this.point(FINISH_X, 0.6);
+    const [fx, fy] = this.point(sim.finishX, home.body.getPosition().y + home.height / 2);
     g.moveTo(fx, fy).lineTo(fx, fy - 105).stroke({ color: C.cream, width: 3 });
     for (let x = 0; x < 5; x++) for (let y = 0; y < 3; y++) {
       g.rect(fx + x * 7, fy - 105 + y * 7, 7, 7).fill((x + y) % 2 ? C.sky : C.lime);

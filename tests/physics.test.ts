@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { Vec2 } from 'planck';
 import { DEFAULTS, NO_INPUT, Simulation, STEP } from '../src/game/physics';
 import type { Input } from '../src/game/physics';
+import { CLASSIC_DEFAULTS } from '../src/game/settings';
 
 function advance(sim: Simulation, seconds: number, input: Input = NO_INPUT) {
   for (let i = 0; i < Math.round(seconds / STEP); i++) sim.step(input);
@@ -112,14 +113,14 @@ describe('the physical fairy', () => {
   });
 
   it('lets the fairy physically tip the pivoting platform', () => {
-    const sim = new Simulation(); place(sim, 27, 1.55);
+    const sim = new Simulation(); place(sim, sim.pivot.getPosition().x + 1.5, sim.pivot.getPosition().y + 1.5);
     let rotation = 0;
     for (let i = 0; i < 120; i++) { sim.step(); rotation = Math.max(rotation, Math.abs(sim.pivot.getAngle())); }
     expect(rotation).toBeGreaterThan(0.05);
   });
 
   it('produces asymmetric foot contact and rotation on a ledge catch', () => {
-    const sim = new Simulation(); place(sim, 9.3, 1.8, -0.35, 0.4, -1);
+    const sim = new Simulation({}, 'garden'); place(sim, 9.3, 1.8, -0.35, 0.4, -1);
     let singleFoot = false, rotated = false;
     for (let i = 0; i < 120; i++) {
       sim.step();
@@ -169,7 +170,7 @@ describe('the physical fairy', () => {
   });
 
   it('finishes only after reaching the flag with supporting foot contact', () => {
-    const sim = new Simulation(); sim.state = 'running'; place(sim, 46.5, 4);
+    const sim = new Simulation(); sim.state = 'running'; place(sim, sim.finishX + 0.5, 4);
     sim.step(); expect(sim.state).toBe('running');
     advance(sim, 1.5);
     expect(sim.state).toBe('finished');
@@ -193,5 +194,88 @@ describe('the physical fairy', () => {
       return sim.snapshot();
     };
     expect(run()).toEqual(run());
+  });
+});
+
+describe('Flow flight control', () => {
+  it('holds a bounded lean instead of accumulating flips during a long direction press', () => {
+    const sim = new Simulation(); place(sim, 2, 100);
+    let maxLean = 0, maxSpin = 0;
+    for (let i = 0; i < 360; i++) {
+      sim.step({ ...NO_INPUT, right: true });
+      maxLean = Math.max(maxLean, Math.abs(sim.snapshot().angle));
+      maxSpin = Math.max(maxSpin, Math.abs(sim.torso.getAngularVelocity()));
+    }
+    expect(maxLean).toBeLessThan(sim.settings.tiltLimit * Math.PI / 180 + 0.15);
+    expect(maxSpin).toBeLessThan(sim.settings.turnSpeed * Math.PI / 180 + 0.5);
+  });
+
+  it('brakes and settles after release without instantly changing angle', () => {
+    const flow = new Simulation(), raw = new Simulation({ ...DEFAULTS, flightAssist: 0 });
+    place(flow, 2, 100); place(raw, 2, 100);
+    for (const sim of [flow, raw]) advance(sim, 0.3, { ...NO_INPUT, right: true });
+    const before = flow.snapshot().angle;
+    flow.step();
+    expect(Math.abs(flow.snapshot().angle - before)).toBeLessThan(0.1);
+    advance(flow, 0.35); advance(raw, 0.35);
+    expect(Math.abs(flow.snapshot().angle)).toBeLessThan(Math.abs(raw.snapshot().angle) * 0.6);
+    expect(Math.abs(flow.torso.getAngularVelocity())).toBeLessThan(0.8);
+  });
+
+  it('keeps useful steering during an impact recovery', () => {
+    const sim = new Simulation(); place(sim, 2, 30); sim.stun = 0.7;
+    advance(sim, 0.25, { ...NO_INPUT, left: true });
+    expect(sim.stun).toBeGreaterThan(0);
+    expect(sim.snapshot().angle).toBeGreaterThan(0.1);
+  });
+
+  it('preserves free rotation in the Classic profile', () => {
+    const sim = new Simulation(CLASSIC_DEFAULTS, 'garden'); place(sim, 2, 100);
+    advance(sim, 1.5, { ...NO_INPUT, right: true });
+    expect(Math.abs(sim.snapshot().angle)).toBeGreaterThan(Math.PI);
+  });
+
+  it('provides a shorter course and a wider, nearer first landing', () => {
+    const first = new Simulation(), garden = new Simulation({}, 'garden');
+    const runway = first.platforms.find(p => p.id === 'runway')!;
+    const landing = first.platforms.find(p => p.id === 'landing')!;
+    const gap = landing.body.getPosition().x - landing.width / 2 - (runway.body.getPosition().x + runway.width / 2);
+    expect(gap).toBeLessThan(1.5);
+    expect(landing.width).toBeGreaterThan(garden.platforms.find(p => p.id === 'landing')!.width);
+    expect(first.finishX).toBeLessThan(garden.finishX);
+  });
+
+  it.each([0.45, 0.6, 0.8])('clears the first gap with a %s second burst and settles without counter-steering', burst => {
+    const sim = new Simulation(); advance(sim, 0.5);
+    for (let i = 0; i < 600 && sim.snapshot().x < 6; i++) sim.step({ ...NO_INPUT, right: true });
+    advance(sim, burst, { ...NO_INPUT, right: true, action: true });
+    advance(sim, 2.5);
+    const landing = sim.platforms.find(p => p.id === 'landing')!;
+    const result = sim.snapshot();
+    expect(result.state).toBe('running');
+    const runway = sim.platforms.find(p => p.id === 'runway')!;
+    expect(result.x).toBeGreaterThan(runway.body.getPosition().x + runway.width / 2);
+    const contacts = [];
+    for (let c = sim.world.getContactList(); c; c = c.getNext()) if (c.isTouching()) contacts.push(c);
+    expect(contacts.some(c => c.getFixtureA().getBody() === landing.body || c.getFixtureB().getBody() === landing.body)).toBe(true);
+    expect(result.x).toBeLessThan(landing.body.getPosition().x + landing.width / 2);
+    expect(result.grounded).toBe(true);
+    expect(Math.abs(result.angle)).toBeLessThan(0.2);
+    expect(result.landings).toBeGreaterThan(0);
+  });
+
+  it('finishes First Flight using only run, burst, and release inputs', () => {
+    const sim = new Simulation(); advance(sim, 0.5);
+    const right = { ...NO_INPUT, right: true };
+    for (const [launch, burst] of [[6, 0.6], [12, 0.8], [17.1, 0.65], [23.5, 0.65]]) {
+      for (let i = 0; i < 1500 && sim.snapshot().x < launch && (sim.state === 'running' || sim.state === 'ready'); i++) sim.step(right);
+      advance(sim, burst, { ...right, action: true });
+      advance(sim, 2.2);
+      expect(sim.state).toBe('running');
+    }
+    for (let i = 0; i < 1200 && sim.state === 'running'; i++) sim.step(right);
+    expect(sim.state).toBe('finished');
+    expect(sim.elapsed).toBeLessThan(30);
+    expect(sim.snapshot().landings).toBeGreaterThanOrEqual(3);
   });
 });

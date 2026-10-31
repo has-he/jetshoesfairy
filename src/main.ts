@@ -1,6 +1,7 @@
 import './style.css';
-import { DEFAULTS, NO_INPUT, Simulation, STEP } from './game/physics';
-import type { Input, Settings } from './game/physics';
+import { NO_INPUT, Simulation, STEP } from './game/physics';
+import type { CourseId, Input, Settings } from './game/physics';
+import { CONTROLS as controls, PRESETS, importSettings, validateSettings } from './game/settings';
 import { GameRenderer } from './game/renderer';
 
 const icon = (name: 'bolt' | 'reset' | 'pause' | 'play' | 'sound' | 'muted' | 'sliders' | 'arrow' | 'expand') => {
@@ -18,53 +19,32 @@ const icon = (name: 'bolt' | 'reset' | 'pause' | 'play' | 'sound' | 'muted' | 's
   return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths[name]}</svg>`;
 };
 
-type Control = { key: keyof Settings; label: string; min: number; max: number; step: number; unit: string };
-const controls: Control[] = [
-  { key: 'thrust', label: 'Jet strength', min: 20, max: 44, step: 1, unit: 'm/s²' },
-  { key: 'rotationTorque', label: 'Air rotation', min: 2, max: 14, step: 0.5, unit: 'N·m' },
-  { key: 'fuelCapacity', label: 'Fuel capacity', min: 0.5, max: 3.5, step: 0.1, unit: 's' },
-  { key: 'fuelRegen', label: 'Refill rate', min: 0.2, max: 2, step: 0.1, unit: 's/s' },
-  { key: 'wingDrag', label: 'Wing resistance', min: 1, max: 10, step: 0.5, unit: 's⁻¹' },
-  { key: 'balance', label: 'Balance assist', min: 0, max: 2, step: 0.1, unit: '×' },
-  { key: 'jointStrength', label: 'Joint strength', min: 0.2, max: 2, step: 0.1, unit: '×' },
-  { key: 'mass', label: 'Body mass', min: 0.5, max: 2, step: 0.1, unit: '×' },
-  { key: 'angularDamping', label: 'Angular damping', min: 0, max: 2, step: 0.05, unit: '' },
-  { key: 'friction', label: 'Surface friction', min: 0.1, max: 1.4, step: 0.05, unit: '' },
-  { key: 'crashThreshold', label: 'Impact tolerance', min: 2, max: 10, step: 0.5, unit: 'm/s' },
-];
 const storage = {
   get(key: string) { try { return localStorage.getItem(key); } catch { return null; } },
   set(key: string, value: string) { try { localStorage.setItem(key, value); } catch { /* Play remains available without storage. */ } },
 };
-function validateSettings(data: unknown): Partial<Settings> {
-  if (!data || typeof data !== 'object' || Array.isArray(data)) throw new Error('Choose a valid tuning preset.');
-  const result: Partial<Settings> = {};
-  for (const c of controls) {
-    const value = (data as Record<string, unknown>)[c.key];
-    if (value === undefined) continue;
-    if (typeof value !== 'number' || !Number.isFinite(value) || value < c.min || value > c.max)
-      throw new Error(`${c.label} must be between ${c.min} and ${c.max}.`);
-    result[c.key] = value;
-  }
-  if (!Object.keys(result).length) throw new Error('No physics settings found in this file.');
-  return result;
-}
 let saved: Partial<Settings> = {};
-try { const raw = storage.get('jf-settings'); if (raw) saved = validateSettings(JSON.parse(raw)); } catch { /* Ignore invalid old presets. */ }
-const sim = new Simulation(saved);
+let legacySaved: Settings | undefined;
+try { const raw = storage.get('jf-settings-v2'); if (raw) saved = validateSettings(JSON.parse(raw)); } catch { /* Keep usable defaults. */ }
+try { const raw = storage.get('jf-settings'); if (raw) legacySaved = importSettings(JSON.parse(raw)); } catch { /* Old tuning remains untouched in storage. */ }
+const course: CourseId = storage.get('jf-course-v2') === 'garden' ? 'garden' : 'first-flight';
+const sim = new Simulation(saved, course);
+const bestKey = () => `jf-best-v2-${sim.course}-${sim.settings.flightAssist ? 'flow' : 'classic'}`;
+const readBest = () => { const n = Number(storage.get(bestKey())); return Number.isFinite(n) && n > 0 ? n : 0; };
+const presetOptions = `<option value="flow">Flow · guided flight</option><option value="classic">Classic · v0.1</option><option value="training">Training wings</option><option value="chaos">A little more chaos</option>${legacySaved ? '<option value="legacy">Your saved v0.1 tuning</option>' : ''}<option value="custom" disabled>Custom tuning</option>`;
 const renderer = new GameRenderer();
 const input: Input = { ...NO_INPUT };
-let paused = false, debug = false, attempts = 1, best = Number(storage.get('jf-best')) || 0;
+let paused = false, debug = false, attempts = 1, best = readBest();
 let lastTime = 0, accumulator = 0, terminalShown = false, muted = true;
 let audio: AudioContext | undefined;
 let jetOscillator: OscillatorNode | undefined;
 let jetGain: GainNode | undefined;
-let lastStun = false, overlayMode = '', displayedBest = -1;
+let lastStun = false, overlayMode = '', displayedBest = -1, lastLanding = 0, landingUntil = 0;
 
 document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
   <header class="site-header">
     <a class="brand" href="./" aria-label="Jetshoes Fairy home"><span class="brand-icon">${icon('bolt')}</span><span>JETSHOES<span class="brand-light">FAIRY</span></span></a>
-    <div class="header-right"><span class="build-badge"><i></i> PLAYABLE EXPERIMENT</span><span class="version">VOL. 001</span></div>
+    <div class="header-right"><span class="build-badge"><i></i> PLAYABLE EXPERIMENT</span><span class="version">VOL. 002</span></div>
   </header>
   <main>
     <section class="intro" aria-labelledby="title">
@@ -73,11 +53,11 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
     </section>
     <div class="workspace">
       <section class="game-card" aria-label="Playable physics prototype">
-        <div class="game-toolbar"><div class="course-name"><span class="live-dot"></span> THE FLOATING GARDEN <span class="course-number">/ 01</span></div><div class="tools"><button class="icon-button" id="sound" aria-label="Enable sound" aria-pressed="false" title="Enable sound">${icon('muted')}</button><button class="icon-button" id="debug" aria-label="Show physics overlay" aria-pressed="false" title="Physics overlay (G)">${icon('sliders')}</button><button class="icon-button" id="fullscreen" aria-label="Enter fullscreen" title="Fullscreen">${icon('expand')}</button></div></div>
+        <div class="game-toolbar"><div class="course-name"><span class="live-dot"></span> <select id="course" aria-label="Course"><option value="first-flight">FIRST FLIGHT / SHORT COURSE</option><option value="garden">THE FLOATING GARDEN / FULL COURSE</option></select></div><div class="tools"><button class="icon-button" id="sound" aria-label="Enable sound" aria-pressed="false" title="Enable sound">${icon('muted')}</button><button class="icon-button" id="debug" aria-label="Show physics overlay" aria-pressed="false" title="Physics overlay (G)">${icon('sliders')}</button><button class="icon-button" id="fullscreen" aria-label="Enter fullscreen" title="Fullscreen">${icon('expand')}</button></div></div>
         <div class="stage" id="stage" tabindex="0" aria-label="Game. A and D or arrows to run and rotate. Hold Space for jets and wings. R to retry.">
           <div class="stage-top"><div class="attempt-chip"><span class="tiny-label">ATTEMPT</span><strong id="attempt">001</strong></div><div class="time-chip"><span class="tiny-label">FLIGHT TIME</span><strong id="timer">00:00.00</strong></div></div>
-          <div class="first-hint" id="first-hint"><span class="hint-star">✳</span><div><strong>Find your feet. Then leave the ground.</strong><span>Move with <kbd>←</kbd> <kbd>→</kbd> · Hold <kbd>SPACE</kbd> to fire your jets</span></div></div>
-          <div class="stage-bottom"><div class="fuel-hud"><div class="fuel-heading">${icon('bolt')}<span id="fuel-label">JET FUEL</span><span id="fuel-value">100%</span></div><div class="fuel-track"><div id="fuel-fill"></div><span></span><span></span><span></span><span></span></div><p id="movement-state">FEET DOWN. FUEL UP.</p></div><div class="speed-hud"><strong id="speed">0.0</strong><span>m/s</span><span class="air-state" id="air-state">GROUNDED</span></div></div>
+          <div class="first-hint" id="first-hint"><span class="hint-star">✳</span><div><strong id="hint-title">A short burst. A soft landing.</strong><span id="hint-controls">Run <kbd>→</kbd> · Burst <kbd>SPACE</kbd> · Release arrows to settle</span></div></div>
+          <div class="landing-feedback" id="landing-feedback" hidden>Nice landing. <span>Keep the flow.</span></div><div class="stage-bottom"><div class="fuel-hud"><div class="fuel-heading">${icon('bolt')}<span id="fuel-label">JET FUEL</span><span id="fuel-value">100%</span></div><div class="fuel-track"><div id="fuel-fill"></div><span></span><span></span><span></span><span></span></div><p id="movement-state">FEET DOWN. FUEL UP.</p></div><div class="speed-hud"><strong id="speed">0.0</strong><span>m/s</span><span class="air-state" id="air-state">GROUNDED</span></div></div>
           <div class="game-overlay" id="overlay" hidden><div class="overlay-card"><span class="eyebrow" id="overlay-kicker">A LEARNING EXPERIENCE</span><h2 id="overlay-title">Gravity: 1. Fairy: 0.</h2><p id="overlay-copy">A little less thrust. A little more faith.</p><button class="primary-button" id="overlay-retry">${icon('reset')} One more try <kbd>R</kbd></button></div></div>
           <div class="touch-controls" aria-label="Touch game controls"><div><button data-input="left" aria-label="Run left or rotate counterclockwise">←</button><button data-input="right" aria-label="Run right or rotate clockwise">→</button></div><button data-input="action" aria-label="Hold for jet thrust or wings">${icon('bolt')}</button></div>
           <p class="loading" id="loading">Growing wings<span>Preparing the flight lab…</span></p>
@@ -88,25 +68,25 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
         <div class="panel-tabs" role="tablist" aria-label="Flight lab panels"><button role="tab" aria-selected="true" aria-controls="controls-panel" id="controls-tab" tabindex="0">Flight manual</button><button role="tab" aria-selected="false" aria-controls="tuning-panel" id="tuning-tab" tabindex="-1">${icon('sliders')} Tuning lab</button></div>
         <div id="controls-panel" role="tabpanel" aria-labelledby="controls-tab" class="panel-content">
           <span class="eyebrow">A FAIRY WITH A LEARNING CURVE</span><h2>Easy to learn.<br /><em>Hard to land.</em></h2>
-          <div class="control-row"><div class="key-pair"><kbd data-key="left">←</kbd><kbd data-key="right">→</kbd></div><div><strong>Run & rotate</strong><p>On the ground, find your stride.<br />In the air, find your angle.</p></div></div>
+          <div class="control-row"><div class="key-pair"><kbd data-key="left">←</kbd><kbd data-key="right">→</kbd></div><div><strong id="steering-label">Run & lean</strong><p id="air-manual">Hold a direction to lean. <br />Release it to settle.</p></div></div>
           <div class="control-row"><kbd class="space-key" data-key="action">SPACE</kbd><div><strong>Thrust & float</strong><p>Hold to fire both jets. Out of fuel?<br />Keep holding to open your wings.</p></div></div>
           <div class="control-row"><div class="key-pair"><kbd>R</kbd></div><div><strong>Try. Tumble. Repeat.</strong><p>An instant fresh start.<br />The platforms reset, too.</p></div></div>
-          <div class="field-note"><span>↳ FIELD NOTE 001</span><p>Your shoes push in the direction<br />your body points. <em>Mind the angle.</em></p></div>
+          <label class="select-label" for="feel">FLIGHT FEEL</label><select id="feel">${presetOptions}</select><div class="field-note"><span>↳ ONE GOOD HOP</span><p id="flight-note">Try half a second of thrust near the edge. <em>Then let go and aim for the landing.</em></p></div>
           <div class="personal-best"><span>YOUR BEST FLIGHT</span><strong id="best">— <small>make it to the flag</small></strong></div>
         </div>
         <div id="tuning-panel" role="tabpanel" aria-labelledby="tuning-tab" class="panel-content tuning-content" hidden>
           <span class="eyebrow">MAKE A LITTLE ADJUSTMENT</span><h2>Find your <em>feel.</em></h2><p class="tuning-note">Changes apply live. Mass, fuel and joint settings carry into your next attempt.</p>
-          <label class="select-label" for="preset">FLIGHT PRESET</label><select id="preset"><option value="original">Original fairy</option><option value="training">Training wings</option><option value="chaos">A little more chaos</option><option value="custom">Custom tuning</option></select>
+          <label class="select-label" for="preset">FLIGHT PRESET</label><select id="preset">${presetOptions}</select>
           <div class="sliders">${controls.map(c => `<div class="slider-control"><label for="setting-${c.key}">${c.label}</label><output id="value-${c.key}" for="setting-${c.key}"></output><input type="range" id="setting-${c.key}" data-setting="${c.key}" min="${c.min}" max="${c.max}" step="${c.step}" /></div>`).join('')}</div>
           <label class="debug-label"><input id="debug-check" type="checkbox" /> Show bodies, joints & contacts <kbd>G</kbd></label>
-          <div class="preset-actions"><button id="export" class="small-button">Export preset ↗</button><button id="import" class="small-button">Import preset ↙</button></div><button id="defaults" class="text-button">Restore original physics ↺</button><input id="import-file" type="file" accept="application/json,.json" hidden />
+          <div class="preset-actions"><button id="export" class="small-button">Export preset ↗</button><button id="import" class="small-button">Import preset ↙</button></div><button id="defaults" class="text-button">Restore Flow physics ↺</button><input id="import-file" type="file" accept="application/json,.json" hidden />
         </div>
       </aside>
     </div>
     <section class="course-strip" aria-label="Course progress"><div class="strip-heading"><span class="tiny-label">THE OBJECTIVE</span><strong>Get there. In one piece.</strong></div><div class="route"><div class="route-line"><span id="route-progress"></span></div><span class="route-stop"><i></i>01 <span>Leave the ground</span></span><span class="route-stop"><i></i>02 <span>Stick the landing</span></span><span class="route-stop"><i></i>03 <span>Find your balance</span></span><span class="route-stop"><i>⚑</i> <span>Make it home</span></span></div><div class="distance"><strong id="distance">0.0</strong><span>METERS FLOWN</span></div></section>
-    <footer><span>THREE CONTROLS. <span class="footer-star">✳</span> ENDLESS WAYS TO FALL.</span><span>A physics playground. A work in progress. <span class="footer-version">v0.1</span></span></footer>
+    <footer><span>THREE CONTROLS. <span class="footer-star">✳</span> ENDLESS WAYS TO FALL.</span><span>A physics playground. A work in progress. <span class="footer-version">v0.2</span></span></footer>
   </main>
-  <dialog id="briefing"><button class="dialog-close icon-button" aria-label="Close flight briefing">×</button><span class="eyebrow">PRE-FLIGHT BRIEFING</span><h2>Gravity is a<br /><em>tough teacher.</em></h2><p>You’re a tiny fairy with two jet shoes and very little room for error. Reach the flag at the end of the floating garden.</p><ol><li><strong>Find your stride.</strong> A / D or ← / → run on supporting feet and rotate your body in the air.</li><li><strong>Use short bursts.</strong> Hold Space to thrust along your body’s angle. Land on your feet and release thrust to refuel.</li><li><strong>Save the landing.</strong> When fuel runs out, hold Space to spread your wings and brake gradually. Release to freefall. Once wings open, release before firing refilled jets.</li><li><strong>Keep trying.</strong> R resets the entire course instantly. P pauses. G reveals the physics underneath.</li></ol><p class="dialog-note">Awkward doesn’t always mean over. A foot catch, a tumble, even an upside-down landing might be recoverable.</p><button class="primary-button" id="briefing-close">Let’s find out ${icon('arrow')}</button></dialog>
+  <dialog id="briefing"><button class="dialog-close icon-button" aria-label="Close flight briefing">×</button><span class="eyebrow">PRE-FLIGHT BRIEFING</span><h2>Gravity is a<br /><em>tough teacher.</em></h2><p>You’re a tiny fairy with two jet shoes and very little room for error. Reach the flag at the end of the floating garden.</p><ol><li><strong>Find your stride.</strong> A / D or ← / → run on supporting feet. Flow mode leans toward that direction in the air and settles when released. Classic mode keeps free rotation.</li><li><strong>Use short bursts.</strong> Hold Space to thrust along your body’s angle. Land on your feet and release thrust to refuel.</li><li><strong>Save the landing.</strong> When fuel runs out, hold Space to spread your wings and brake gradually. Release to freefall. Once wings open, release before firing refilled jets.</li><li><strong>Keep trying.</strong> Start with First Flight, a short course with broad landings. R retries instantly. P pauses. G reveals the physics underneath.</li></ol><p class="dialog-note">Awkward doesn’t always mean over. A foot catch, a tumble, even an upside-down landing might be recoverable.</p><button class="primary-button" id="briefing-close">Let’s find out ${icon('arrow')}</button></dialog>
   <div class="toast" id="toast" role="status" hidden></div>
 `;
 
@@ -133,12 +113,14 @@ function updateSliders() {
     $(`value-${c.key}`).textContent = `${Number(sim.settings[c.key].toFixed(2))} ${c.unit}`;
   }
 }
-function saveSettings() { storage.set('jf-settings', JSON.stringify(sim.settings)); }
+function saveSettings() { storage.set('jf-settings-v2', JSON.stringify(sim.settings)); }
 updateSliders();
-if (Object.keys(saved).length) $<HTMLSelectElement>('preset').value = 'custom';
+setPresetLabel(Object.keys(saved).length ? 'custom' : 'flow');
+$<HTMLSelectElement>('course').value = sim.course;
+updateFlightManual();
 
 function reset() {
-  sim.reset(); renderer.resetCamera(); accumulator = 0; terminalShown = false;
+  sim.reset(); renderer.resetCamera(); accumulator = 0; terminalShown = false; lastLanding = 0; landingUntil = 0;
   attempts++; $('attempt').textContent = String(attempts).padStart(3, '0');
   clearInput(); setPaused(false); stage.focus({ preventScroll: true });
 }
@@ -231,22 +213,38 @@ $('briefing-close').onclick = () => briefing.close();
 briefing.addEventListener('close', () => { setPaused(false); stage.focus({ preventScroll: true }); });
 briefing.addEventListener('click', e => { if (e.target === briefing) { const r = briefing.getBoundingClientRect(); if (e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom) briefing.close(); } });
 
+function setPresetLabel(value: string) {
+  for (const id of ['preset', 'feel']) $<HTMLSelectElement>(id).value = value;
+}
+function updateFlightManual() {
+  const flow = Boolean(sim.settings.flightAssist);
+  $('steering-label').textContent = flow ? 'Run & lean' : 'Run & rotate';
+  $('hint-title').textContent = flow ? 'A short burst. A soft landing.' : 'Small inputs. Counter-steer early.';
+  $('hint-controls').innerHTML = `Run <kbd>→</kbd> · Burst <kbd>SPACE</kbd> · ${flow ? 'Release arrows to settle' : 'Counter-steer to brake'}`;
+  $('air-manual').innerHTML = flow ? 'Hold a direction to lean. <br />Release it to settle.' : 'Free rotation in the air. <br />Counter-steer to stop a spin.';
+  $('flight-note').textContent = flow ? 'Try half a second of thrust near the edge. Then let go and aim for the landing.' : 'Your shoes push where your body points. Use short inputs and counter-steer early.';
+}
+function refreshBest() { best = readBest(); displayedBest = -1; }
+function applyPreset(name: string) {
+  if (name === 'custom') return;
+  const next = name === 'legacy' ? legacySaved : PRESETS[name as keyof typeof PRESETS];
+  if (!next) return;
+  sim.updateSettings(next); updateSliders(); saveSettings(); setPresetLabel(name); updateFlightManual(); refreshBest(); reset();
+  toast(name === 'legacy' ? 'Your v0.1 tuning is back. The original saved copy is preserved.' : 'Flight feel changed. Fresh runway, fresh attempt.');
+}
 for (const c of controls) $<HTMLInputElement>(`setting-${c.key}`).oninput = e => {
   sim.updateSettings({ [c.key]: Number((e.target as HTMLInputElement).value) });
-  updateSliders(); saveSettings(); $<HTMLSelectElement>('preset').value = 'custom';
+  updateSliders(); saveSettings(); setPresetLabel('custom'); updateFlightManual();
+  if (c.key === 'flightAssist') { refreshBest(); reset(); }
 };
-$<HTMLSelectElement>('preset').onchange = e => {
-  const preset = (e.target as HTMLSelectElement).value;
-  if (preset === 'custom') return;
-  const next = preset === 'training' ? { ...DEFAULTS, rotationTorque: 5, wingDrag: 7, balance: 1.5, jointStrength: 1.3, fuelCapacity: 2.3 }
-    : preset === 'chaos' ? { ...DEFAULTS, rotationTorque: 10, balance: 0.5, jointStrength: 0.65, thrust: 35 } : { ...DEFAULTS };
-  sim.updateSettings(next); updateSliders(); saveSettings(); toast('Preset applied. Retry for a fresh launch.');
+for (const id of ['preset', 'feel']) $<HTMLSelectElement>(id).onchange = e => applyPreset((e.target as HTMLSelectElement).value);
+$<HTMLSelectElement>('course').onchange = e => {
+  sim.course = (e.target as HTMLSelectElement).value as CourseId;
+  storage.set('jf-course-v2', sim.course); refreshBest(); reset();
 };
-$('defaults').onclick = () => {
-  sim.updateSettings(DEFAULTS); updateSliders(); saveSettings(); $<HTMLSelectElement>('preset').value = 'original'; toast('Original fairy physics restored.');
-};
+$('defaults').onclick = () => { applyPreset('flow'); toast('Flow physics restored. Your v0.1 tuning is still preserved.'); };
 $('export').onclick = () => {
-  const url = URL.createObjectURL(new Blob([JSON.stringify({ format: 'jetshoes-fairy-tuning-v1', settings: sim.settings }, null, 2)], { type: 'application/json' }));
+  const url = URL.createObjectURL(new Blob([JSON.stringify({ format: 'jetshoes-fairy-tuning-v2', settings: sim.settings }, null, 2)], { type: 'application/json' }));
   const link = document.createElement('a'); link.href = url; link.download = 'fairy-tuning.json'; link.click();
   window.setTimeout(() => URL.revokeObjectURL(url), 1000); toast('Tuning preset exported. Share it with a fellow fairy.');
 };
@@ -257,14 +255,16 @@ $<HTMLInputElement>('import-file').onchange = async e => {
     const file = picker.files?.[0]; if (!file) return;
     if (file.size > 100_000) throw new Error('That file is too large for a tuning preset.');
     const data = JSON.parse(await file.text());
-    const settings = validateSettings(data.settings ?? data);
-    sim.updateSettings(settings); updateSliders(); saveSettings(); $<HTMLSelectElement>('preset').value = 'custom'; toast('Tuning preset imported.');
+    const settings = importSettings(data);
+    sim.updateSettings(settings); updateSliders(); saveSettings(); setPresetLabel('custom'); updateFlightManual(); refreshBest(); reset(); toast('Tuning preset imported.');
   } catch (err) { toast(err instanceof Error ? err.message : 'Could not import this preset.'); }
   finally { picker.value = ''; }
 };
 
 function updateHUD() {
   const s = sim.snapshot();
+  if (s.landings > lastLanding) { lastLanding = s.landings; landingUntil = performance.now() + 1300; }
+  $('landing-feedback').hidden = performance.now() > landingUntil || paused || s.state !== 'running';
   $('timer').textContent = fmt(s.elapsed);
   $('fuel-value').textContent = `${Math.round(s.fuel * 100)}%`;
   $('fuel-fill').style.width = `${s.fuel * 100}%`;
@@ -281,7 +281,7 @@ function updateHUD() {
   $('status-text').textContent = paused ? 'Taking a breather' : s.state === 'ready' ? 'Ready when you are' : s.state === 'finished' ? 'A little fairy. A very good flight.' : s.state === 'fallen' ? 'A good excuse for one more try' : 'Flight in progress';
   if ((s.state === 'fallen' || s.state === 'finished') && !terminalShown) {
     terminalShown = true;
-    if (s.state === 'finished' && (!best || s.elapsed < best)) { best = s.elapsed; storage.set('jf-best', String(best)); }
+    if (s.state === 'finished' && (!best || s.elapsed < best)) { best = s.elapsed; storage.set(bestKey(), String(best)); }
     $('overlay-kicker').textContent = s.state === 'finished' ? 'YOU MADE IT HOME' : 'A LEARNING EXPERIENCE';
     $('overlay-title').textContent = s.state === 'finished' ? 'Small wings. Big win.' : 'Gravity: 1. Fairy: 0.';
     $('overlay-copy').textContent = s.state === 'finished' ? `${fmt(s.elapsed)} · Same fairy. A little more skill.` : `${s.maxDistance.toFixed(1)} meters of valuable flight research.`;

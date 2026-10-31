@@ -1,25 +1,15 @@
 import { World, Vec2, Box, Circle, RevoluteJoint } from 'planck';
 import type { Body, RevoluteJoint as MotorJoint } from 'planck';
+import { DEFAULTS } from './settings.ts';
+import type { Settings } from './settings.ts';
+export { DEFAULTS } from './settings.ts';
+export type { Settings } from './settings.ts';
 
 export const STEP = 1 / 120;
-export const FINISH_X = 46;
+export type CourseId = 'first-flight' | 'garden';
 export type Input = { left: boolean; right: boolean; action: boolean };
 export const NO_INPUT: Input = { left: false, right: false, action: false };
 
-export const DEFAULTS = {
-  mass: 1,
-  thrust: 30,
-  rotationTorque: 7,
-  angularDamping: 0.65,
-  fuelCapacity: 1.8,
-  fuelRegen: 0.9,
-  wingDrag: 5,
-  jointStrength: 1,
-  balance: 1,
-  friction: 0.85,
-  crashThreshold: 4.8,
-};
-export type Settings = typeof DEFAULTS;
 export type PartName = 'torso' | 'head' | 'thigh-l' | 'thigh-r' | 'shin-l' | 'shin-r' | 'foot-l' | 'foot-r';
 export type Part = { name: PartName; body: Body; width: number; height: number };
 export type Platform = { id: string; body: Body; width: number; height: number; pivot: boolean; recharge: boolean };
@@ -28,6 +18,7 @@ export type Snapshot = {
   fuel: number; grounded: boolean; jets: boolean; wings: boolean;
   elapsed: number; progress: number; state: 'ready' | 'running' | 'fallen' | 'finished';
   tumbling: boolean; maxDistance: number;
+  landings: number;
 };
 
 const clamp = (v: number, a: number, b: number) => Math.max(a, Math.min(b, v));
@@ -42,6 +33,7 @@ export class Simulation {
   torso!: Body;
   pivot!: Body;
   settings: Settings;
+  course: CourseId;
   fuel = 0;
   elapsed = 0;
   grounded = false;
@@ -54,9 +46,14 @@ export class Simulation {
   state: Snapshot['state'] = 'ready';
   private pendingImpact = 0;
   private supportGrace = 0;
+  private airborneTime = 0;
+  private landings = 0;
+  private landingCandidate = 0;
+  private settledTime = 0;
 
-  constructor(settings: Partial<Settings> = {}) {
+  constructor(settings: Partial<Settings> = {}, course: CourseId = 'first-flight') {
     this.settings = { ...DEFAULTS, ...settings };
+    this.course = course;
     this.reset();
   }
 
@@ -66,18 +63,27 @@ export class Simulation {
     this.platforms = [];
     this.joints = [];
     this.fuel = this.settings.fuelCapacity;
-    this.elapsed = this.phase = this.stun = this.pendingImpact = this.maxDistance = this.supportGrace = 0;
+    this.elapsed = this.phase = this.stun = this.pendingImpact = this.maxDistance = this.supportGrace = this.airborneTime = this.landings = 0;
+    this.landingCandidate = this.settledTime = 0;
     this.grounded = this.jets = this.wings = this.wingLatched = false;
     this.state = 'ready';
 
-    this.platform('runway', 2.5, -0.5, 13, 1);
-    this.platform('landing', 14.4, -0.8, 3.2, 0.8);
-    this.platform('step', 19.4, 0, 3, 1);
-    this.pivot = this.platform('seesaw', 25.3, 0.1, 7, 0.28, true).body;
-    this.platform('recovery', 33.2, -0.45, 4, 0.9);
-    this.platform('home', 43, -0.1, 12, 1.4);
-    // Low freestanding block: an intentional foot-catch / impact experiment.
-    this.platform('block', 40.5, 1, 0.5, 0.8, false, false);
+    if (this.course === 'first-flight') {
+      this.platform('runway', 1.5, -0.5, 11, 1);
+      this.platform('landing', 10.4, -0.7, 5, 0.8);
+      this.platform('step', 16.1, 0, 4, 1);
+      this.pivot = this.platform('seesaw', 22, 0.36, 5.4, 0.28, true).body;
+      this.platform('home', 29.3, -0.45, 8, 0.9);
+    } else {
+      this.platform('runway', 2.5, -0.5, 13, 1);
+      this.platform('landing', 14.4, -0.8, 3.2, 0.8);
+      this.platform('step', 19.4, 0, 3, 1);
+      this.pivot = this.platform('seesaw', 25.3, 0.1, 7, 0.28, true).body;
+      this.platform('recovery', 33.2, -0.45, 4, 0.9);
+      this.platform('home', 43, -0.1, 12, 1.4);
+      // Low freestanding block: an intentional foot-catch / impact experiment.
+      this.platform('block', 40.5, 1, 0.5, 0.8, false, false);
+    }
     const anchor = this.world.createBody();
     this.world.createJoint(RevoluteJoint({
       enableLimit: true, lowerAngle: -0.38, upperAngle: 0.38,
@@ -102,6 +108,7 @@ export class Simulation {
   }
 
   get totalMass() { return this.parts.reduce((n, p) => n + p.body.getMass(), 0); }
+  get finishX() { return this.course === 'first-flight' ? 29.5 : 46; }
 
   private platform(id: string, x: number, y: number, width: number, height: number, pivot = false, recharge = true) {
     const body = this.world.createBody({ type: pivot ? 'dynamic' : 'static', position: Vec2(x, y), angularDamping: 0.9 });
@@ -116,7 +123,7 @@ export class Simulation {
     const part = (name: PartName, dx: number, dy: number, w: number, h: number, density: number, round = false) => {
       const body = this.world.createDynamicBody({
         position: Vec2(x + dx, y + dy), angularDamping: this.settings.angularDamping,
-        linearDamping: 0.04, bullet: true, allowSleep: false,
+        linearDamping: 0.04 + this.settings.airDrag, bullet: true, allowSleep: false,
       });
       body.createFixture(round ? Circle(w / 2) : Box(w / 2, h / 2), {
         density: density * this.settings.mass, friction: this.settings.friction,
@@ -155,6 +162,7 @@ export class Simulation {
     this.fuel = clamp(this.fuel * this.settings.fuelCapacity / previousCapacity, 0, this.settings.fuelCapacity);
     for (const p of this.parts) {
       p.body.setAngularDamping(this.settings.angularDamping);
+      p.body.setLinearDamping(0.04 + this.settings.airDrag);
       for (let f = p.body.getFixtureList(); f; f = f.getNext()) {
         f.setDensity(f.getDensity() * this.settings.mass / previousMass);
         f.setFriction(this.settings.friction);
@@ -200,7 +208,10 @@ export class Simulation {
     const upright = Math.cos(this.torso.getAngle()) > 0.4;
     this.supportGrace = this.grounded ? 0.07 : Math.max(0, this.supportGrace - dt);
     const supported = (this.grounded || this.supportGrace > 0) && upright && !this.jets && this.torso.getLinearVelocity().y < 2;
-    const control = this.stun > 0 ? 0.16 : 1;
+    const control = this.stun > 0 ? (s.flightAssist ? 0.4 : 0.16) : 1;
+    const steeringControl = this.stun > 0 ? (s.flightAssist ? 0.75 : 0.16) : 1;
+    const motorControl = this.stun > 0 ? 0.16 : 1;
+    for (const { body } of this.parts) body.setLinearDamping(0.04 + (supported ? 0 : s.airDrag));
     if (supported) {
       this.phase += dt * (Math.abs(direction) ? 11 : 0);
       const vx = this.torso.getLinearVelocity().x;
@@ -218,7 +229,21 @@ export class Simulation {
       const supportAcceleration = clamp(extension * 130 - this.torso.getLinearVelocity().y * 14, 0, 35);
       this.torso.applyForceToCenter(Vec2(0, supportAcceleration * this.totalMass * s.balance * control), true);
     } else {
-      this.torso.applyTorque(-direction * s.rotationTorque * control, true);
+      let torque = -direction * s.rotationTorque;
+      if (s.flightAssist) {
+        const angle = wrap(this.torso.getAngle());
+        const limit = s.tiltLimit * Math.PI / 180;
+        // Holding a direction aims toward a lean instead of accelerating into a flip.
+        // Release brakes spin, then gently settles a normal flight pose toward upright.
+        const error = direction ? wrap(-direction * limit - angle) : Math.abs(angle) < Math.PI / 2 ? -angle * 0.28 : 0;
+        const targetRate = clamp(error * 5, -s.turnSpeed * Math.PI / 180, s.turnSpeed * Math.PI / 180);
+        const inertia = this.parts.reduce((sum, p) => {
+          const offset = Vec2.sub(p.body.getWorldCenter(), this.torso.getWorldCenter());
+          return sum + p.body.getInertia() + p.body.getMass() * offset.lengthSquared();
+        }, 0);
+        torque = clamp((targetRate - this.torso.getAngularVelocity()) * s.turnBraking * inertia, -s.rotationTorque, s.rotationTorque);
+      }
+      this.torso.applyTorque(torque * steeringControl, true);
     }
 
     for (const { joint, type, side } of this.joints) {
@@ -232,7 +257,7 @@ export class Simulation {
       } else if (type === 'knee') target = -0.12;
       joint.setMotorSpeed(clamp((target - joint.getJointAngle()) * 18 - joint.getJointSpeed() * 0.7, -12, 12));
       const max = { hip: 65, knee: 50, ankle: 32, neck: 5 }[type];
-      joint.setMaxMotorTorque(max * s.jointStrength * s.mass * control);
+      joint.setMaxMotorTorque(max * s.jointStrength * s.mass * motorControl);
     }
 
     if (this.jets) {
@@ -250,7 +275,7 @@ export class Simulation {
       }
       // A limited stabilizer offsets most shoe/COM misalignment, never resets angle or spin.
       // It leaves commanded air torque and contact-driven rotation intact.
-      this.torso.applyTorque(-clamp(jetMoment * 0.9 * Math.min(1, s.balance), -45, 45) * control, true);
+      this.torso.applyTorque(-clamp(jetMoment * (s.flightAssist ? 1 : 0.9) * Math.min(1, s.balance), -45, 45) * steeringControl, true);
     }
     if (this.wings) {
       for (const { body } of this.parts) {
@@ -263,11 +288,21 @@ export class Simulation {
     this.pendingImpact = 0;
     this.world.step(dt, 10, 5);
     this.grounded = this.supportingFeet();
-    if (this.pendingImpact > s.crashThreshold) this.stun = Math.min(1.3, this.pendingImpact * 0.09);
+    if (!this.grounded) this.airborneTime += dt;
+    else {
+      if (this.airborneTime > 0.18 && Math.cos(this.torso.getAngle()) > 0.7 && this.pendingImpact < s.crashThreshold) this.landingCandidate = 0.8;
+      this.airborneTime = 0;
+    }
+    this.landingCandidate = Math.max(0, this.landingCandidate - dt);
+    if (this.landingCandidate > 0 && this.grounded && Math.cos(this.torso.getAngle()) > 0.8 && Math.abs(this.torso.getLinearVelocity().y) < 2 && this.stun === 0) {
+      this.settledTime += dt;
+      if (this.settledTime > 0.1) { this.landings++; this.landingCandidate = this.settledTime = 0; }
+    } else this.settledTime = 0;
+    if (this.pendingImpact > s.crashThreshold) this.stun = Math.min(s.flightAssist ? 0.75 : 1.3, this.pendingImpact * 0.09);
     const p = this.torso.getPosition();
     this.maxDistance = Math.max(this.maxDistance, p.x - 2.1);
-    if (p.y < -8 || p.x < -7 || p.x > 58) this.state = 'fallen';
-    if (p.x >= FINISH_X && this.grounded && this.state === 'running') this.state = 'finished';
+    if (p.y < -8 || p.x < -7 || p.x > this.finishX + 12) this.state = 'fallen';
+    if (p.x >= this.finishX && this.grounded && this.state === 'running') this.state = 'finished';
     if (this.state === 'fallen' || this.state === 'finished') this.jets = this.wings = false;
   }
 
@@ -278,9 +313,10 @@ export class Simulation {
       x: p.x, y: p.y, vx: v.x, vy: v.y, angle: this.torso.getAngle(),
       fuel: this.fuel / this.settings.fuelCapacity, grounded: this.grounded,
       jets: this.jets, wings: this.wings, elapsed: this.elapsed,
-      progress: clamp((p.x - 2.1) / (FINISH_X - 2.1), 0, 1), state: this.state,
+      progress: clamp((p.x - 2.1) / (this.finishX - 2.1), 0, 1), state: this.state,
       tumbling: this.stun > 0 || Math.cos(this.torso.getAngle()) < -0.1,
       maxDistance: this.maxDistance,
+      landings: this.landings,
     };
   }
 }
